@@ -1,7 +1,7 @@
 from flask import Flask, render_template, jsonify, request
 import yfinance as yf
 import feedparser
-import requests
+import requests as req_lib
 import re
 import os
 from datetime import datetime, timedelta
@@ -9,8 +9,7 @@ from urllib.parse import quote
 
 app = Flask(__name__)
 
-# Browser-like session — reduces Yahoo Finance 429 rate-limit errors
-_YF_SESSION = requests.Session()
+_YF_SESSION = req_lib.Session()
 _YF_SESSION.headers.update({
     'User-Agent': (
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
@@ -19,6 +18,121 @@ _YF_SESSION.headers.update({
     ),
     'Accept-Language': 'en-US,en;q=0.9',
 })
+
+# ---------------------------------------------------------------------------
+# Price + FX data  (yfinance primary, stooq fallback)
+# ---------------------------------------------------------------------------
+
+def _one_day_after(date_str):
+    return (datetime.strptime(date_str, '%Y-%m-%d') + timedelta(days=1)).strftime('%Y-%m-%d')
+
+
+def _get_history_yfinance(ticker, start_str, end_str):
+    try:
+        end_plus = _one_day_after(end_str)
+        stock = yf.Ticker(ticker, session=_YF_SESSION)
+        hist  = stock.history(start=start_str, end=end_plus)
+        if hist is not None and not hist.empty:
+            return hist
+    except Exception as exc:
+        print('[yfinance] history failed for {}: {}'.format(ticker, exc))
+    return None
+
+
+def _get_history_stooq(ticker, start_str, end_str):
+    try:
+        from pandas_datareader import data as pdr
+        for sticker in [ticker + '.US', ticker]:
+            try:
+                df = pdr.DataReader(sticker, 'stooq', start_str, end_str)
+                if df is not None and not df.empty:
+                    return df.sort_index()
+            except Exception:
+                pass
+    except ImportError:
+        print('[stooq] pandas_datareader not installed')
+    return None
+
+
+def get_price_history(ticker, start_str, end_str):
+    hist = _get_history_yfinance(ticker, start_str, end_str)
+    if hist is not None:
+        return hist, 'yfinance'
+    print('[data] yfinance blocked, trying stooq for {}'.format(ticker))
+    hist = _get_history_stooq(ticker, start_str, end_str)
+    if hist is not None:
+        return hist, 'stooq'
+    return None, None
+
+
+def get_ticker_meta(ticker):
+    company_name = ticker
+    currency     = 'USD'
+    exchange     = ''
+    is_etf       = False
+    etf_holdings = []
+    try:
+        stock = yf.Ticker(ticker, session=_YF_SESSION)
+        try:
+            fi       = stock.fast_info
+            currency = getattr(fi, 'currency', None) or currency
+            exchange = getattr(fi, 'exchange', None) or exchange
+        except Exception:
+            pass
+        try:
+            info         = stock.get_info()
+            company_name = info.get('longName') or info.get('shortName') or ticker
+            currency     = info.get('currency')  or currency
+            exchange     = info.get('exchange')  or exchange
+            quote_type   = info.get('quoteType', 'EQUITY')
+            is_etf       = quote_type in ('ETF', 'MUTUALFUND')
+            if is_etf:
+                for h in (info.get('holdings') or [])[:5]:
+                    etf_holdings.append({
+                        'symbol': h.get('symbol',      ''),
+                        'name':   h.get('holdingName', ''),
+                        'pct':    round((h.get('holdingPercent') or 0) * 100, 2),
+                    })
+        except Exception as exc:
+            print('[meta] info failed for {} ({}); using defaults'.format(ticker, exc))
+    except Exception as exc:
+        print('[meta] failed for {}: {}'.format(ticker, exc))
+    return company_name, currency, exchange, is_etf, etf_holdings
+
+
+def get_fx_map(currency, start_str, end_str):
+    if currency == 'EUR':
+        return {}
+    end_plus = _one_day_after(end_str)
+    # yfinance
+    try:
+        pair    = currency + 'EUR=X'
+        fx_hist = yf.Ticker(pair, session=_YF_SESSION).history(start=start_str, end=end_plus)
+        if fx_hist is not None and not fx_hist.empty:
+            return {idx.date(): row['Close'] for idx, row in fx_hist.iterrows()}
+    except Exception as exc:
+        print('[fx yfinance] {}: {}'.format(currency, exc))
+    # stooq
+    try:
+        from pandas_datareader import data as pdr
+        fx_df = pdr.DataReader(currency + 'EUR', 'stooq', start_str, end_str)
+        if fx_df is not None and not fx_df.empty:
+            fx_df = fx_df.sort_index()
+            return {idx.date(): row['Close'] for idx, row in fx_df.iterrows()}
+    except Exception as exc:
+        print('[fx stooq] {}: {}'.format(currency, exc))
+    print('[fx] WARNING: no FX data for {}->EUR'.format(currency))
+    return {}
+
+
+def lookup_fx(d, fx_map, currency):
+    if currency == 'EUR' or not fx_map:
+        return 1.0
+    if d in fx_map:
+        return fx_map[d]
+    closest = min(fx_map.keys(), key=lambda x: abs((x - d).days))
+    return fx_map[closest]
+
 
 # ---------------------------------------------------------------------------
 # News helpers
@@ -41,9 +155,8 @@ SOURCES_SITE_QUERY = ' OR '.join('site:' + d for d in SOURCE_DOMAINS)
 
 
 def get_source_name(url):
-    url_lower = url.lower()
     for domain, name in SOURCE_DOMAINS.items():
-        if domain in url_lower:
+        if domain in url.lower():
             return name
     return 'Financial News'
 
@@ -66,14 +179,9 @@ def parse_entry_date(entry):
 def fetch_news(ticker, company_name, start_date, end_date):
     items = []
     seen  = set()
-
     query     = '"{}" OR "{}" ({})'.format(company_name, ticker, SOURCES_SITE_QUERY)
-    gnews_url = (
-        'https://news.google.com/rss/search'
-        '?q={}&hl=en-US&gl=US&ceid=US:en'.format(quote(query))
-    )
+    gnews_url = 'https://news.google.com/rss/search?q={}&hl=en-US&gl=US&ceid=US:en'.format(quote(query))
     yahoo_url = 'https://finance.yahoo.com/rss/headline?s={}'.format(ticker)
-
     for url in [gnews_url, yahoo_url]:
         try:
             feed = feedparser.parse(url, request_headers={'User-Agent': 'Mozilla/5.0'})
@@ -98,7 +206,6 @@ def fetch_news(ticker, company_name, start_date, end_date):
                 })
         except Exception as exc:
             print('[news] Error fetching {}: {}'.format(url, exc))
-
     items.sort(key=lambda x: x['date'])
     return items
 
@@ -117,28 +224,6 @@ def group_news(news_items, price_data, is_weekly):
         else:
             grouped.setdefault(item['date'], []).append(item)
     return grouped
-
-
-# ---------------------------------------------------------------------------
-# FX helpers
-# ---------------------------------------------------------------------------
-
-def build_fx_map(currency, start_str, end_str):
-    if currency == 'EUR':
-        return {}
-    pair      = currency + 'EUR=X'
-    end_plus  = (datetime.strptime(end_str, '%Y-%m-%d') + timedelta(days=2)).strftime('%Y-%m-%d')
-    fx_hist   = yf.Ticker(pair, session=_YF_SESSION).history(start=start_str, end=end_plus)
-    return {idx.date(): row['Close'] for idx, row in fx_hist.iterrows()}
-
-
-def get_fx(d, fx_map, currency):
-    if currency == 'EUR' or not fx_map:
-        return 1.0
-    if d in fx_map:
-        return fx_map[d]
-    closest = min(fx_map.keys(), key=lambda x: abs((x - d).days))
-    return fx_map[closest]
 
 
 # ---------------------------------------------------------------------------
@@ -172,55 +257,22 @@ def analyze():
     is_weekly  = delta_days > 28
 
     try:
-        stock = yf.Ticker(ticker, session=_YF_SESSION)
+        company_name, currency, exchange, is_etf, etf_holdings = get_ticker_meta(ticker)
 
-        # Step 1: fast_info — light endpoint, rarely rate-limited
-        try:
-            fi       = stock.fast_info
-            currency = getattr(fi, 'currency', None) or 'USD'
-            exchange = getattr(fi, 'exchange', None) or ''
-        except Exception:
-            currency = 'USD'
-            exchange = ''
-
-        # Step 2: full info for company name / ETF details — may 429, so optional
-        company_name = ticker
-        is_etf       = False
-        etf_holdings = []
-        try:
-            info         = stock.get_info()
-            company_name = info.get('longName') or info.get('shortName') or ticker
-            currency     = info.get('currency')  or currency
-            exchange     = info.get('exchange')  or exchange
-            quote_type   = info.get('quoteType', 'EQUITY')
-            is_etf       = quote_type in ('ETF', 'MUTUALFUND')
-            if is_etf:
-                for h in (info.get('holdings') or [])[:5]:
-                    etf_holdings.append({
-                        'symbol': h.get('symbol',       ''),
-                        'name':   h.get('holdingName',  ''),
-                        'pct':    round((h.get('holdingPercent') or 0) * 100, 2),
-                    })
-        except Exception as exc:
-            print('[info] Metadata unavailable for {} ({}); using fast_info fallback.'.format(ticker, exc))
-
-        # Step 3: historical prices — different endpoint, usually works fine
-        end_fetch = (end_date + timedelta(days=1)).isoformat()
-        hist      = stock.history(start=start_str, end=end_fetch)
-        if hist.empty:
+        hist, data_source = get_price_history(ticker, start_str, end_str)
+        if hist is None or hist.empty:
             return jsonify({
                 'error': 'No price data found for "{}". Check the ticker symbol and date range.'.format(ticker)
             }), 404
 
-        # FX conversion map
-        fx_map = build_fx_map(currency, start_str, end_fetch)
+        fx_map = get_fx_map(currency, start_str, end_str)
 
         def make_point(d, close):
-            fx = get_fx(d, fx_map, currency)
+            fx = lookup_fx(d, fx_map, currency)
             return {
                 'date':           d.isoformat(),
                 'price':          round(close * fx, 2),
-                'original_price': round(close, 2),
+                'original_price': round(float(close), 2),
                 'fx_rate':        round(fx, 4),
             }
 
@@ -231,7 +283,7 @@ def analyze():
                 d = idx.date()
                 if d < start_date:
                     continue
-                pt              = make_point(d, row['Close'])
+                pt               = make_point(d, row['Close'])
                 pt['week_start'] = (d - timedelta(days=6)).isoformat()
                 price_data.append(pt)
         else:
@@ -244,11 +296,9 @@ def analyze():
         if not price_data:
             return jsonify({'error': 'No price data in this date range.'}), 404
 
-        # News
         news_items     = fetch_news(ticker, company_name, start_date, end_date)
         news_by_period = group_news(news_items, price_data, is_weekly)
 
-        # Stats
         prices    = [p['price'] for p in price_data]
         min_price = min(prices)
         max_price = max(prices)
@@ -264,6 +314,7 @@ def analyze():
             'is_etf':       is_etf,
             'etf_holdings': etf_holdings,
             'is_weekly':    is_weekly,
+            'data_source':  data_source,
             'prices':       price_data,
             'news':         news_by_period,
             'stats': {
