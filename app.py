@@ -1,6 +1,7 @@
 from flask import Flask, render_template, jsonify, request
 import yfinance as yf
 import feedparser
+import requests
 import re
 import os
 from datetime import datetime, timedelta
@@ -8,9 +9,20 @@ from urllib.parse import quote
 
 app = Flask(__name__)
 
-# ──────────────────────────────────────────────
+# Browser-like session — reduces Yahoo Finance 429 rate-limit errors
+_YF_SESSION = requests.Session()
+_YF_SESSION.headers.update({
+    'User-Agent': (
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+        'AppleWebKit/537.36 (KHTML, like Gecko) '
+        'Chrome/124.0.0.0 Safari/537.36'
+    ),
+    'Accept-Language': 'en-US,en;q=0.9',
+})
+
+# ---------------------------------------------------------------------------
 # News helpers
-# ──────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 
 SOURCE_DOMAINS = {
     'reuters.com':      'Reuters',
@@ -25,10 +37,10 @@ SOURCE_DOMAINS = {
     'economist.com':    'The Economist',
 }
 
-SOURCES_SITE_QUERY = " OR ".join(f"site:{d}" for d in SOURCE_DOMAINS)
+SOURCES_SITE_QUERY = ' OR '.join('site:' + d for d in SOURCE_DOMAINS)
 
 
-def get_source_name(url: str) -> str:
+def get_source_name(url):
     url_lower = url.lower()
     for domain, name in SOURCE_DOMAINS.items():
         if domain in url_lower:
@@ -36,7 +48,7 @@ def get_source_name(url: str) -> str:
     return 'Financial News'
 
 
-def strip_html(text: str) -> str:
+def strip_html(text):
     return re.sub(r'<[^>]+>', '', text or '').strip()
 
 
@@ -51,20 +63,16 @@ def parse_entry_date(entry):
     return None
 
 
-def fetch_news(ticker: str, company_name: str, start_date, end_date) -> list:
-    """Fetch news from Google News RSS + Yahoo Finance RSS."""
+def fetch_news(ticker, company_name, start_date, end_date):
     items = []
-    seen = set()
+    seen  = set()
 
-    # Google News RSS (aggregates Reuters, CNBC, MarketWatch, etc.)
-    query = f'"{company_name}" OR "{ticker}" ({SOURCES_SITE_QUERY})'
+    query     = '"{}" OR "{}" ({})'.format(company_name, ticker, SOURCES_SITE_QUERY)
     gnews_url = (
-        f'https://news.google.com/rss/search'
-        f'?q={quote(query)}&hl=en-US&gl=US&ceid=US:en'
+        'https://news.google.com/rss/search'
+        '?q={}&hl=en-US&gl=US&ceid=US:en'.format(quote(query))
     )
-
-    # Yahoo Finance ticker-specific RSS
-    yahoo_url = f'https://finance.yahoo.com/rss/headline?s={ticker}'
+    yahoo_url = 'https://finance.yahoo.com/rss/headline?s={}'.format(ticker)
 
     for url in [gnews_url, yahoo_url]:
         try:
@@ -73,17 +81,14 @@ def fetch_news(ticker: str, company_name: str, start_date, end_date) -> list:
                 pub_date = parse_entry_date(entry)
                 if not pub_date or not (start_date <= pub_date <= end_date):
                     continue
-
                 link = entry.get('link', '#')
                 if link in seen:
                     continue
                 seen.add(link)
-
                 title   = strip_html(entry.get('title', 'No title'))
                 summary = strip_html(entry.get('summary', ''))
                 if len(summary) > 450:
-                    summary = summary[:447] + '…'
-
+                    summary = summary[:447] + '...'
                 items.append({
                     'date':    pub_date.isoformat(),
                     'title':   title,
@@ -92,14 +97,13 @@ def fetch_news(ticker: str, company_name: str, start_date, end_date) -> list:
                     'source':  get_source_name(link),
                 })
         except Exception as exc:
-            print(f'[news] Error fetching {url}: {exc}')
+            print('[news] Error fetching {}: {}'.format(url, exc))
 
     items.sort(key=lambda x: x['date'])
     return items
 
 
-def group_news(news_items: list, price_data: list, is_weekly: bool) -> dict:
-    """Map each news item to its corresponding chart point key (date string)."""
+def group_news(news_items, price_data, is_weekly):
     grouped = {}
     for item in news_items:
         item_date = datetime.strptime(item['date'], '%Y-%m-%d').date()
@@ -111,38 +115,35 @@ def group_news(news_items: list, price_data: list, is_weekly: bool) -> dict:
                     grouped.setdefault(period['date'], []).append(item)
                     break
         else:
-            key = item['date']
-            grouped.setdefault(key, []).append(item)
+            grouped.setdefault(item['date'], []).append(item)
     return grouped
 
 
-# ──────────────────────────────────────────────
-# FX helper
-# ──────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# FX helpers
+# ---------------------------------------------------------------------------
 
-def build_fx_map(currency: str, start_str: str, end_str: str) -> dict:
-    """Return {date: rate} for currency→EUR conversion."""
+def build_fx_map(currency, start_str, end_str):
     if currency == 'EUR':
         return {}
-    pair = f'{currency}EUR=X'
-    end_plus = (datetime.strptime(end_str, '%Y-%m-%d') + timedelta(days=2)).strftime('%Y-%m-%d')
-    fx_hist = yf.Ticker(pair).history(start=start_str, end=end_plus)
+    pair      = currency + 'EUR=X'
+    end_plus  = (datetime.strptime(end_str, '%Y-%m-%d') + timedelta(days=2)).strftime('%Y-%m-%d')
+    fx_hist   = yf.Ticker(pair, session=_YF_SESSION).history(start=start_str, end=end_plus)
     return {idx.date(): row['Close'] for idx, row in fx_hist.iterrows()}
 
 
-def get_fx(d, fx_map: dict, currency: str) -> float:
+def get_fx(d, fx_map, currency):
     if currency == 'EUR' or not fx_map:
         return 1.0
     if d in fx_map:
         return fx_map[d]
-    # Nearest available date
     closest = min(fx_map.keys(), key=lambda x: abs((x - d).days))
     return fx_map[closest]
 
 
-# ──────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 # Routes
-# ──────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 
 @app.route('/')
 def index():
@@ -152,8 +153,8 @@ def index():
 @app.route('/api/analyze')
 def analyze():
     ticker    = request.args.get('ticker', '').strip().upper()
-    start_str = request.args.get('start', '').strip()
-    end_str   = request.args.get('end',   '').strip()
+    start_str = request.args.get('start',  '').strip()
+    end_str   = request.args.get('end',    '').strip()
 
     if not ticker or not start_str or not end_str:
         return jsonify({'error': 'Please provide ticker, start, and end dates.'}), 400
@@ -171,42 +172,51 @@ def analyze():
     is_weekly  = delta_days > 28
 
     try:
-        stock = yf.Ticker(ticker)
-        info  = stock.info
+        stock = yf.Ticker(ticker, session=_YF_SESSION)
 
-        if not info or info.get('regularMarketPrice') is None and info.get('previousClose') is None:
-            # Try a quick history fetch to validate ticker
-            test = stock.history(period='5d')
-            if test.empty:
-                return jsonify({'error': f'Ticker "{ticker}" not found. Check the symbol and try again.'}), 404
+        # Step 1: fast_info — light endpoint, rarely rate-limited
+        try:
+            fi       = stock.fast_info
+            currency = getattr(fi, 'currency', None) or 'USD'
+            exchange = getattr(fi, 'exchange', None) or ''
+        except Exception:
+            currency = 'USD'
+            exchange = ''
 
-        company_name = info.get('longName') or info.get('shortName') or ticker
-        currency     = info.get('currency', 'USD')
-        exchange     = info.get('exchange', '')
-        quote_type   = info.get('quoteType', 'EQUITY')
-        is_etf       = quote_type in ('ETF', 'MUTUALFUND')
-
-        # ETF top holdings
+        # Step 2: full info for company name / ETF details — may 429, so optional
+        company_name = ticker
+        is_etf       = False
         etf_holdings = []
-        if is_etf:
-            for h in (info.get('holdings') or [])[:5]:
-                etf_holdings.append({
-                    'symbol': h.get('symbol', ''),
-                    'name':   h.get('holdingName', ''),
-                    'pct':    round((h.get('holdingPercent') or 0) * 100, 2),
-                })
+        try:
+            info         = stock.get_info()
+            company_name = info.get('longName') or info.get('shortName') or ticker
+            currency     = info.get('currency')  or currency
+            exchange     = info.get('exchange')  or exchange
+            quote_type   = info.get('quoteType', 'EQUITY')
+            is_etf       = quote_type in ('ETF', 'MUTUALFUND')
+            if is_etf:
+                for h in (info.get('holdings') or [])[:5]:
+                    etf_holdings.append({
+                        'symbol': h.get('symbol',       ''),
+                        'name':   h.get('holdingName',  ''),
+                        'pct':    round((h.get('holdingPercent') or 0) * 100, 2),
+                    })
+        except Exception as exc:
+            print('[info] Metadata unavailable for {} ({}); using fast_info fallback.'.format(ticker, exc))
 
-        # Historical prices (fetch one extra day so end_date is included)
+        # Step 3: historical prices — different endpoint, usually works fine
         end_fetch = (end_date + timedelta(days=1)).isoformat()
-        hist = stock.history(start=start_str, end=end_fetch)
+        hist      = stock.history(start=start_str, end=end_fetch)
         if hist.empty:
-            return jsonify({'error': f'No price data for {ticker} in this date range.'}), 404
+            return jsonify({
+                'error': 'No price data found for "{}". Check the ticker symbol and date range.'.format(ticker)
+            }), 404
 
-        # FX rates
+        # FX conversion map
         fx_map = build_fx_map(currency, start_str, end_fetch)
 
         def make_point(d, close):
-            fx   = get_fx(d, fx_map, currency)
+            fx = get_fx(d, fx_map, currency)
             return {
                 'date':           d.isoformat(),
                 'price':          round(close * fx, 2),
@@ -221,7 +231,7 @@ def analyze():
                 d = idx.date()
                 if d < start_date:
                     continue
-                pt = make_point(d, row['Close'])
+                pt              = make_point(d, row['Close'])
                 pt['week_start'] = (d - timedelta(days=6)).isoformat()
                 price_data.append(pt)
         else:
@@ -235,7 +245,7 @@ def analyze():
             return jsonify({'error': 'No price data in this date range.'}), 404
 
         # News
-        news_items = fetch_news(ticker, company_name, start_date, end_date)
+        news_items     = fetch_news(ticker, company_name, start_date, end_date)
         news_by_period = group_news(news_items, price_data, is_weekly)
 
         # Stats
@@ -270,12 +280,12 @@ def analyze():
     except Exception as exc:
         import traceback
         traceback.print_exc()
-        return jsonify({'error': f'Server error: {str(exc)}'}), 500
+        return jsonify({'error': 'Server error: {}'.format(str(exc))}), 500
 
 
-# ──────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 # Entry point
-# ──────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
