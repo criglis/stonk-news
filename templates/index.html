@@ -1,0 +1,618 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Stonk News</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+/* ── Reset & Base ── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { font-size: 16px; -webkit-text-size-adjust: 100%; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  background: #f0f4f9;
+  color: #1a202c;
+  min-height: 100vh;
+  padding-bottom: 40px;
+}
+
+/* ── Header ── */
+header {
+  background: linear-gradient(135deg, #1a56db 0%, #1e40af 100%);
+  color: #fff;
+  padding: 20px 16px 24px;
+  text-align: center;
+}
+header h1 { font-size: 1.6rem; font-weight: 700; letter-spacing: -0.5px; }
+header p  { font-size: 0.85rem; opacity: 0.85; margin-top: 4px; }
+
+/* ── Container ── */
+.container { max-width: 680px; margin: 0 auto; padding: 0 12px; }
+
+/* ── Cards ── */
+.card {
+  background: #fff;
+  border-radius: 16px;
+  box-shadow: 0 2px 12px rgba(0,0,0,.08);
+  padding: 20px;
+  margin-top: 16px;
+}
+
+/* ── Form ── */
+.form-group { margin-bottom: 14px; }
+label {
+  display: block;
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #64748b;
+  margin-bottom: 6px;
+}
+input[type="text"],
+input[type="date"] {
+  width: 100%;
+  padding: 14px 16px;
+  font-size: 1rem;
+  border: 1.5px solid #e2e8f0;
+  border-radius: 12px;
+  outline: none;
+  transition: border-color .2s;
+  background: #f8fafc;
+  color: #1a202c;
+  -webkit-appearance: none;
+}
+input[type="text"]:focus,
+input[type="date"]:focus { border-color: #1a56db; background: #fff; }
+input[type="text"]::placeholder { color: #94a3b8; }
+
+.date-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+
+.btn-primary {
+  width: 100%;
+  padding: 16px;
+  background: linear-gradient(135deg, #1a56db, #1e40af);
+  color: #fff;
+  border: none;
+  border-radius: 12px;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  margin-top: 4px;
+  transition: opacity .2s, transform .1s;
+  -webkit-tap-highlight-color: transparent;
+}
+.btn-primary:active { opacity: .85; transform: scale(.98); }
+
+/* ── Loading ── */
+.loading-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 40px 20px;
+  gap: 14px;
+}
+.spinner {
+  width: 44px; height: 44px;
+  border: 3px solid #e2e8f0;
+  border-top-color: #1a56db;
+  border-radius: 50%;
+  animation: spin .7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.loading-wrap p { color: #64748b; font-size: .9rem; }
+
+/* ── Error ── */
+.error-card {
+  background: #fef2f2;
+  border: 1.5px solid #fecaca;
+  color: #dc2626;
+  font-size: .9rem;
+  line-height: 1.5;
+}
+
+/* ── Company Header ── */
+.company-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.company-header h2 { font-size: 1.2rem; font-weight: 700; }
+.badges { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+.badge {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 20px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+}
+.badge-blue { background: #dbeafe; color: #1e40af; }
+.badge-gray { background: #f1f5f9; color: #475569; }
+.badge-fx   { background: #fef9c3; color: #854d0e; }
+
+/* ── ETF Holdings ── */
+.etf-section { margin-top: 14px; padding-top: 14px; border-top: 1px solid #f1f5f9; }
+.etf-section h3 { font-size: .8rem; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; color: #64748b; margin-bottom: 10px; }
+.holding-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid #f8fafc;
+  font-size: .88rem;
+}
+.holding-symbol { font-weight: 700; color: #1a56db; min-width: 52px; }
+.holding-name   { flex: 1; color: #475569; }
+.holding-pct    { font-weight: 600; color: #1a202c; }
+
+/* ── Chart ── */
+.chart-card { padding: 16px 12px 12px; }
+.chart-title {
+  font-size: .78rem;
+  font-weight: 600;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  margin-bottom: 10px;
+}
+.chart-wrap { position: relative; height: 240px; }
+
+/* ── Stats Grid ── */
+.stats-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 16px;
+}
+.stat-card {
+  background: #fff;
+  border-radius: 14px;
+  box-shadow: 0 2px 8px rgba(0,0,0,.06);
+  padding: 14px 16px;
+}
+.stat-label { font-size: .72rem; font-weight: 600; text-transform: uppercase; letter-spacing: .5px; color: #94a3b8; margin-bottom: 4px; }
+.stat-value { font-size: 1.15rem; font-weight: 700; color: #1a202c; }
+.stat-date  { font-size: .75rem; color: #94a3b8; margin-top: 2px; }
+.stat-return { grid-column: span 2; }
+.positive { color: #16a34a; }
+.negative { color: #dc2626; }
+
+/* ── Chart Hint ── */
+.chart-hint {
+  text-align: center;
+  font-size: .8rem;
+  color: #94a3b8;
+  margin-top: 14px;
+  padding: 0 16px;
+}
+
+/* ── Summary Panel ── */
+.summary-panel {
+  margin-top: 16px;
+}
+.summary-header {
+  border-bottom: 2px solid #1a56db;
+  padding-bottom: 10px;
+  margin-bottom: 14px;
+}
+.summary-header h3 {
+  font-size: 1rem;
+  font-weight: 700;
+  color: #1a56db;
+}
+.summary-subtitle {
+  font-size: .82rem;
+  color: #64748b;
+  margin-top: 2px;
+  font-weight: 500;
+}
+.price-note {
+  background: #fef9c3;
+  border: 1px solid #fde68a;
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: .8rem;
+  color: #854d0e;
+  margin-bottom: 14px;
+}
+.no-news {
+  color: #94a3b8;
+  font-size: .88rem;
+  text-align: center;
+  padding: 20px 0;
+}
+.news-item {
+  padding: 12px 0;
+  border-bottom: 1px solid #f1f5f9;
+}
+.news-item:last-child { border-bottom: none; }
+.news-source {
+  font-size: .7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  color: #1a56db;
+  margin-bottom: 4px;
+}
+.news-title {
+  display: block;
+  font-size: .92rem;
+  font-weight: 600;
+  color: #1a202c;
+  text-decoration: none;
+  line-height: 1.35;
+  margin-bottom: 5px;
+}
+.news-title:hover, .news-title:active { color: #1a56db; }
+.news-summary {
+  font-size: .82rem;
+  color: #64748b;
+  line-height: 1.5;
+}
+
+/* ── Utility ── */
+.hidden { display: none !important; }
+</style>
+</head>
+
+<body>
+
+<header>
+  <h1>📈 Stonk News</h1>
+  <p>Stock prices &amp; news summaries</p>
+</header>
+
+<div class="container">
+
+  <!-- ── Search Form ── -->
+  <div class="card" id="searchCard">
+    <form id="searchForm" autocomplete="off">
+      <div class="form-group">
+        <label for="ticker">Stock Ticker</label>
+        <input type="text" id="ticker" placeholder="e.g. AAPL, MSFT, BTC-EUR, SPY"
+               maxlength="12" autocapitalize="characters" spellcheck="false">
+      </div>
+      <div class="date-row">
+        <div class="form-group">
+          <label for="startDate">Start Date</label>
+          <input type="date" id="startDate">
+        </div>
+        <div class="form-group">
+          <label for="endDate">End Date</label>
+          <input type="date" id="endDate">
+        </div>
+      </div>
+      <button type="submit" class="btn-primary">Analyze</button>
+    </form>
+  </div>
+
+  <!-- ── Loading ── -->
+  <div class="card loading-wrap hidden" id="loadingCard">
+    <div class="spinner"></div>
+    <p id="loadingMsg">Fetching stock data…</p>
+  </div>
+
+  <!-- ── Error ── -->
+  <div class="card error-card hidden" id="errorCard">
+    <strong>⚠️ Error</strong><br>
+    <span id="errorMsg"></span>
+  </div>
+
+  <!-- ── Results ── -->
+  <div id="results" class="hidden">
+
+    <!-- Company header -->
+    <div class="card" id="companyCard">
+      <div class="company-header">
+        <div>
+          <h2 id="companyName"></h2>
+          <div class="badges">
+            <span class="badge badge-blue" id="tickerBadge"></span>
+            <span class="badge badge-gray" id="exchangeBadge"></span>
+            <span class="badge badge-fx hidden" id="fxBadge"></span>
+          </div>
+        </div>
+      </div>
+      <!-- ETF holdings -->
+      <div class="etf-section hidden" id="etfSection">
+        <h3>Top ETF Holdings</h3>
+        <div id="holdingsList"></div>
+      </div>
+    </div>
+
+    <!-- Chart -->
+    <div class="card chart-card">
+      <div class="chart-title" id="chartTitle"></div>
+      <div class="chart-wrap">
+        <canvas id="priceChart"></canvas>
+      </div>
+    </div>
+
+    <!-- Stats -->
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-label">Starting Price</div>
+        <div class="stat-value" id="statStart"></div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Closing Price</div>
+        <div class="stat-value" id="statEnd"></div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Period Low</div>
+        <div class="stat-value" id="statLow"></div>
+        <div class="stat-date"  id="statLowDate"></div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Period High</div>
+        <div class="stat-value" id="statHigh"></div>
+        <div class="stat-date"  id="statHighDate"></div>
+      </div>
+      <div class="stat-card stat-return">
+        <div class="stat-label">Period Return</div>
+        <div class="stat-value" id="statReturn"></div>
+      </div>
+    </div>
+
+    <p class="chart-hint" id="chartHint">Tap a point on the chart to see news</p>
+
+    <!-- Summary Panel -->
+    <div class="card summary-panel hidden" id="summaryPanel">
+      <div class="summary-header">
+        <h3 id="summaryTitle"></h3>
+        <div class="summary-subtitle" id="summarySubtitle"></div>
+      </div>
+      <div id="summaryContent"></div>
+    </div>
+
+  </div><!-- /results -->
+
+</div><!-- /container -->
+
+<script>
+// ── Globals ──────────────────────────────────────────────────────────────────
+let chartInstance = null;
+let activeData    = null;
+let selectedIdx   = -1;
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+function fmt(dateStr) {
+  // 'YYYY-MM-DD' → 'DD/MM/YYYY'
+  const [y, m, d] = dateStr.split('-');
+  return `${d}/${m}/${y}`;
+}
+
+function eur(val) {
+  return `€${Number(val).toFixed(2)}`;
+}
+
+function show(id)  { document.getElementById(id).classList.remove('hidden'); }
+function hide(id)  { document.getElementById(id).classList.add('hidden');    }
+function el(id)    { return document.getElementById(id); }
+function setText(id, txt) { el(id).textContent = txt; }
+
+// ── Date defaults (last 30 days) ─────────────────────────────────────────────
+(function setDefaultDates() {
+  const today = new Date();
+  const prior = new Date(today);
+  prior.setDate(prior.getDate() - 30);
+  el('endDate').value   = today.toISOString().slice(0, 10);
+  el('startDate').value = prior.toISOString().slice(0, 10);
+})();
+
+// ── Form Submit ───────────────────────────────────────────────────────────────
+el('searchForm').addEventListener('submit', async e => {
+  e.preventDefault();
+
+  const ticker = el('ticker').value.trim().toUpperCase();
+  const start  = el('startDate').value;
+  const end    = el('endDate').value;
+
+  if (!ticker) { alert('Please enter a stock ticker.'); return; }
+  if (!start || !end) { alert('Please choose start and end dates.'); return; }
+
+  // UI: show loading, hide everything else
+  hide('results');
+  hide('errorCard');
+  show('loadingCard');
+  setText('loadingMsg', 'Fetching stock data…');
+
+  try {
+    const res  = await fetch(`/api/analyze?ticker=${encodeURIComponent(ticker)}&start=${start}&end=${end}`);
+    const data = await res.json();
+
+    if (!res.ok) throw new Error(data.error || 'Unknown error');
+
+    activeData  = data;
+    selectedIdx = -1;
+    renderResults(data);
+
+  } catch (err) {
+    hide('loadingCard');
+    setText('errorMsg', err.message);
+    show('errorCard');
+  }
+});
+
+// ── Render Results ────────────────────────────────────────────────────────────
+function renderResults(data) {
+  // Company card
+  setText('companyName', data.company);
+  setText('tickerBadge', data.ticker);
+  setText('exchangeBadge', data.exchange || 'N/A');
+
+  if (data.currency !== 'EUR') {
+    setText('fxBadge', `${data.currency} → EUR`);
+    show('fxBadge');
+  } else {
+    hide('fxBadge');
+  }
+
+  // ETF holdings
+  if (data.is_etf && data.etf_holdings.length > 0) {
+    el('holdingsList').innerHTML = data.etf_holdings.map(h =>
+      `<div class="holding-item">
+        <span class="holding-symbol">${h.symbol}</span>
+        <span class="holding-name">${h.name}</span>
+        <span class="holding-pct">${h.pct}%</span>
+      </div>`
+    ).join('');
+    show('etfSection');
+  } else {
+    hide('etfSection');
+  }
+
+  // Chart title
+  el('chartTitle').textContent =
+    `${data.ticker} — ${data.is_weekly ? 'Weekly' : 'Daily'} Close Price (EUR)`;
+
+  // Build chart data
+  const labels = data.prices.map(p =>
+    data.is_weekly
+      ? fmt(p.week_start) + '\n' + fmt(p.date)
+      : fmt(p.date)
+  );
+  const prices = data.prices.map(p => p.price);
+
+  const positive   = data.stats.return >= 0;
+  const lineColor  = positive ? '#16a34a' : '#dc2626';
+  const fillColor  = positive ? 'rgba(22,163,74,.08)' : 'rgba(220,38,38,.08)';
+  const pointColor = prices.map((_, i) => i === selectedIdx ? '#f59e0b' : lineColor);
+
+  if (chartInstance) { chartInstance.destroy(); chartInstance = null; }
+
+  const ctx = el('priceChart').getContext('2d');
+  chartInstance = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        data: prices,
+        borderColor: lineColor,
+        backgroundColor: fillColor,
+        fill: true,
+        tension: 0.35,
+        pointRadius: 6,
+        pointHoverRadius: 9,
+        pointBackgroundColor: pointColor,
+        pointBorderColor: '#fff',
+        pointBorderWidth: 2,
+        borderWidth: 2.5,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'nearest', intersect: true },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: ctx => eur(ctx.raw),
+            title: ctx => ctx[0].label.replace('\n', ' – '),
+          },
+        },
+      },
+      scales: {
+        x: {
+          ticks: {
+            maxTicksLimit: data.is_weekly ? 8 : 7,
+            font: { size: 10 },
+            color: '#94a3b8',
+            maxRotation: 0,
+          },
+          grid: { color: '#f1f5f9' },
+        },
+        y: {
+          ticks: {
+            callback: v => eur(v),
+            font: { size: 10 },
+            color: '#94a3b8',
+          },
+          grid: { color: '#f1f5f9' },
+        },
+      },
+      onClick: (evt) => {
+        const pts = chartInstance.getElementsAtEventForMode(evt, 'nearest', { intersect: true }, true);
+        if (pts.length) showSummary(pts[0].index);
+      },
+    },
+  });
+
+  // Stats
+  const s = data.stats;
+  setText('statStart',   eur(s.start_price));
+  setText('statEnd',     eur(s.end_price));
+  setText('statLow',     eur(s.min_price));
+  setText('statLowDate', fmt(s.min_date));
+  setText('statHigh',    eur(s.max_price));
+  setText('statHighDate',fmt(s.max_date));
+
+  const retEl = el('statReturn');
+  retEl.textContent = `${s.return >= 0 ? '+' : ''}${s.return}%`;
+  retEl.className   = `stat-value ${s.return >= 0 ? 'positive' : 'negative'}`;
+
+  hide('loadingCard');
+  hide('summaryPanel');
+  show('results');
+  el('results').scrollIntoView({ behavior: 'smooth' });
+}
+
+// ── Show Summary ──────────────────────────────────────────────────────────────
+function showSummary(idx) {
+  if (!activeData) return;
+  selectedIdx = idx;
+
+  const period = activeData.prices[idx];
+  const news   = (activeData.news || {})[period.date] || [];
+
+  // Title / subtitle
+  if (activeData.is_weekly) {
+    setText('summaryTitle',    'Weekly Summary');
+    setText('summarySubtitle', `${fmt(period.week_start)} – ${fmt(period.date)}`);
+  } else {
+    setText('summaryTitle',    'Daily Summary');
+    setText('summarySubtitle', fmt(period.date));
+  }
+
+  // Content
+  let html = '';
+
+  // FX note (brief, only if converted)
+  if (activeData.currency !== 'EUR') {
+    html += `<div class="price-note">
+      Original: ${activeData.currency} ${Number(period.original_price).toFixed(2)}
+      &nbsp;·&nbsp; Rate used: 1 ${activeData.currency} = ${period.fx_rate} EUR
+    </div>`;
+  }
+
+  if (news.length === 0) {
+    html += '<p class="no-news">No articles found from monitored sources for this period.</p>';
+  } else {
+    html += news.map(item => `
+      <div class="news-item">
+        <div class="news-source">${item.source}</div>
+        <a class="news-title" href="${item.link}" target="_blank" rel="noopener">${item.title}</a>
+        ${item.summary ? `<p class="news-summary">${item.summary}</p>` : ''}
+      </div>`
+    ).join('');
+  }
+
+  el('summaryContent').innerHTML = html;
+  show('summaryPanel');
+
+  // Highlight selected point on chart
+  if (chartInstance) {
+    const lineColor = activeData.stats.return >= 0 ? '#16a34a' : '#dc2626';
+    chartInstance.data.datasets[0].pointBackgroundColor =
+      activeData.prices.map((_, i) => i === idx ? '#f59e0b' : lineColor);
+    chartInstance.update('none');
+  }
+
+  el('summaryPanel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+</script>
+
+</body>
+</html>
