@@ -2,7 +2,6 @@ from flask import Flask, render_template, jsonify, request
 import feedparser
 import requests
 import pandas as pd
-import io
 import re
 import os
 from datetime import datetime, timedelta
@@ -10,49 +9,67 @@ from urllib.parse import quote
 
 app = Flask(__name__)
 
+TWELVE_DATA_KEY = os.environ.get('TWELVE_DATA_KEY', '')
+
 # ---------------------------------------------------------------------------
-# Price data — stooq HTTP CSV API (free, no key, no broken dependencies)
-# URL: https://stooq.com/q/d/l/?s=aapl.us&d1=20240101&d2=20240131&i=d
+# Price data — Twelve Data REST API (free tier: 800 req/day, no IP blocks)
+# Sign up free at https://twelvedata.com  →  copy your API key  →
+# add TWELVE_DATA_KEY=<key> in Render dashboard → Environment
 # ---------------------------------------------------------------------------
 
 def get_price_history(ticker, start_str, end_str):
     """
-    Fetch daily OHLCV from stooq CSV endpoint.
-    Returns (DataFrame indexed by Date with 'Close' column, ticker_used) or (None, None).
+    Returns (DataFrame with DatetimeIndex + 'Close' column, currency, exchange)
+    or raises RuntimeError with a user-friendly message.
     """
-    d1 = start_str.replace('-', '')
-    d2 = end_str.replace('-', '')
-
-    # Try <TICKER>.US first (all US stocks/ETFs), then bare ticker
-    candidates = [ticker + '.US', ticker]
-    if '.' in ticker:
-        candidates = [ticker, ticker + '.US']
-
-    for sticker in candidates:
-        url = 'https://stooq.com/q/d/l/?s={}&d1={}&d2={}&i=d'.format(
-            sticker.lower(), d1, d2
+    if not TWELVE_DATA_KEY:
+        raise RuntimeError(
+            'TWELVE_DATA_KEY is not configured. '
+            'See the setup instructions to add your free API key.'
         )
-        try:
-            resp = requests.get(
-                url, timeout=15,
-                headers={'User-Agent': 'Mozilla/5.0 (compatible; StooqBot/1.0)'}
-            )
-            if resp.status_code != 200:
-                continue
-            text = resp.text.strip()
-            # stooq returns "No data" page or very short text when ticker not found
-            if 'Date' not in text or len(text) < 50:
-                continue
-            df = pd.read_csv(io.StringIO(text))
-            df['Date'] = pd.to_datetime(df['Date'])
-            df = df.set_index('Date').sort_index()
-            if not df.empty and 'Close' in df.columns:
-                print('[stooq] got {} rows for {}'.format(len(df), sticker))
-                return df, sticker
-        except Exception as exc:
-            print('[stooq] {} failed: {}'.format(sticker, exc))
 
-    return None, None
+    resp = requests.get(
+        'https://api.twelvedata.com/time_series',
+        params={
+            'symbol':     ticker,
+            'interval':   '1day',
+            'start_date': start_str,
+            'end_date':   end_str,
+            'outputsize': 5000,
+            'apikey':     TWELVE_DATA_KEY,
+        },
+        timeout=20,
+    )
+    data = resp.json()
+
+    if data.get('status') == 'error':
+        msg = data.get('message', 'Unknown error from Twelve Data')
+        print('[twelvedata] {}: {}'.format(ticker, msg))
+        return None, None, None
+
+    values = data.get('values', [])
+    if not values:
+        return None, None, None
+
+    meta     = data.get('meta', {})
+    currency = meta.get('currency', 'USD')
+    exchange = meta.get('exchange', '')
+
+    records = []
+    for v in values:
+        try:
+            records.append({
+                'Date':  pd.to_datetime(v['datetime']),
+                'Close': float(v['close']),
+            })
+        except (KeyError, ValueError):
+            continue
+
+    if not records:
+        return None, None, None
+
+    df = pd.DataFrame(records).set_index('Date').sort_index()
+    return df, currency, exchange
 
 
 # ---------------------------------------------------------------------------
@@ -60,10 +77,8 @@ def get_price_history(ticker, start_str, end_str):
 # ---------------------------------------------------------------------------
 
 def get_fx_map(currency, start_str, end_str):
-    """Returns {date: rate} for currency -> EUR via ECB/Frankfurter."""
     if currency == 'EUR':
         return {}
-
     url = 'https://api.frankfurter.app/{}..{}?from={}&to=EUR'.format(
         start_str, end_str, currency
     )
@@ -79,12 +94,10 @@ def get_fx_map(currency, start_str, end_str):
                 return fx_map
     except Exception as exc:
         print('[fx] Frankfurter failed for {}: {}'.format(currency, exc))
-
     return {}
 
 
 def lookup_fx(d, fx_map, currency):
-    """Get FX rate for date d; interpolate to nearest trading day if needed."""
     if currency == 'EUR' or not fx_map:
         return 1.0
     if d in fx_map:
@@ -195,6 +208,12 @@ def index():
     return render_template('index.html')
 
 
+@app.route('/api/setup')
+def setup_check():
+    """Frontend polls this to check if the API key is configured."""
+    return jsonify({'ready': bool(TWELVE_DATA_KEY)})
+
+
 @app.route('/api/analyze')
 def analyze():
     ticker    = request.args.get('ticker', '').strip().upper()
@@ -217,24 +236,14 @@ def analyze():
     is_weekly  = delta_days > 28
 
     try:
-        # 1 — Price data from stooq
-        hist, stooq_ticker = get_price_history(ticker, start_str, end_str)
+        # 1 — Price data
+        hist, currency, exchange = get_price_history(ticker, start_str, end_str)
         if hist is None or hist.empty:
             return jsonify({
-                'error': (
-                    'No price data found for "{}". '
-                    'Check the symbol and date range. '
-                    'Crypto is not supported.'.format(ticker)
-                )
+                'error': 'No price data found for "{}". Check the symbol and date range.'.format(ticker)
             }), 404
 
-        # stooq .US tickers are priced in USD; .DE tickers in EUR
-        if stooq_ticker.upper().endswith('.DE'):
-            currency = 'EUR'
-        else:
-            currency = 'USD'
-
-        # 2 — FX rates from ECB via Frankfurter
+        # 2 — FX rates
         fx_map = get_fx_map(currency, start_str, end_str)
 
         def make_point(d, close):
@@ -246,7 +255,7 @@ def analyze():
                 'fx_rate':        round(fx, 4),
             }
 
-        # 3 — Build price_data list
+        # 3 — Build price_data
         if is_weekly:
             weekly     = hist.resample('W').last()
             price_data = []
@@ -283,7 +292,7 @@ def analyze():
             'ticker':    ticker,
             'company':   ticker,
             'currency':  currency,
-            'exchange':  '',
+            'exchange':  exchange,
             'is_etf':    False,
             'is_weekly': is_weekly,
             'prices':    price_data,
@@ -299,6 +308,8 @@ def analyze():
             },
         })
 
+    except RuntimeError as exc:
+        return jsonify({'error': str(exc), 'setup_needed': True}), 503
     except Exception as exc:
         import traceback
         traceback.print_exc()
