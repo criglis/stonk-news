@@ -1,6 +1,8 @@
 from flask import Flask, render_template, jsonify, request
 import feedparser
 import requests
+import pandas as pd
+import io
 import re
 import os
 from datetime import datetime, timedelta
@@ -9,26 +11,44 @@ from urllib.parse import quote
 app = Flask(__name__)
 
 # ---------------------------------------------------------------------------
-# Price data — stooq (free, no API key, not IP-blocked)
+# Price data — stooq HTTP CSV API (free, no key, no broken dependencies)
+# URL: https://stooq.com/q/d/l/?s=aapl.us&d1=20240101&d2=20240131&i=d
 # ---------------------------------------------------------------------------
 
 def get_price_history(ticker, start_str, end_str):
     """
-    Fetch daily OHLCV from stooq via pandas_datareader.
-    Tries <TICKER>.US first (covers all US stocks/ETFs), then bare ticker.
-    Returns (DataFrame, stooq_ticker_used) or (None, None).
+    Fetch daily OHLCV from stooq CSV endpoint.
+    Returns (DataFrame indexed by Date with 'Close' column, ticker_used) or (None, None).
     """
-    from pandas_datareader import data as pdr
+    d1 = start_str.replace('-', '')
+    d2 = end_str.replace('-', '')
 
+    # Try <TICKER>.US first (all US stocks/ETFs), then bare ticker
     candidates = [ticker + '.US', ticker]
     if '.' in ticker:
         candidates = [ticker, ticker + '.US']
 
     for sticker in candidates:
+        url = 'https://stooq.com/q/d/l/?s={}&d1={}&d2={}&i=d'.format(
+            sticker.lower(), d1, d2
+        )
         try:
-            df = pdr.DataReader(sticker, 'stooq', start_str, end_str)
-            if df is not None and not df.empty:
-                return df.sort_index(), sticker
+            resp = requests.get(
+                url, timeout=15,
+                headers={'User-Agent': 'Mozilla/5.0 (compatible; StooqBot/1.0)'}
+            )
+            if resp.status_code != 200:
+                continue
+            text = resp.text.strip()
+            # stooq returns "No data" page or very short text when ticker not found
+            if 'Date' not in text or len(text) < 50:
+                continue
+            df = pd.read_csv(io.StringIO(text))
+            df['Date'] = pd.to_datetime(df['Date'])
+            df = df.set_index('Date').sort_index()
+            if not df.empty and 'Close' in df.columns:
+                print('[stooq] got {} rows for {}'.format(len(df), sticker))
+                return df, sticker
         except Exception as exc:
             print('[stooq] {} failed: {}'.format(sticker, exc))
 
@@ -40,10 +60,7 @@ def get_price_history(ticker, start_str, end_str):
 # ---------------------------------------------------------------------------
 
 def get_fx_map(currency, start_str, end_str):
-    """
-    Returns {date: rate} mapping currency -> EUR via ECB/Frankfurter.
-    e.g. currency='USD' => how many EUR per 1 USD on each trading day.
-    """
+    """Returns {date: rate} for currency -> EUR via ECB/Frankfurter."""
     if currency == 'EUR':
         return {}
 
@@ -53,16 +70,13 @@ def get_fx_map(currency, start_str, end_str):
     try:
         resp = requests.get(url, timeout=10)
         if resp.status_code == 200:
-            data = resp.json()
             fx_map = {}
-            for date_str, currencies in data.get('rates', {}).items():
+            for date_str, ccy in resp.json().get('rates', {}).items():
                 d = datetime.strptime(date_str, '%Y-%m-%d').date()
-                fx_map[d] = currencies.get('EUR', 1.0)
+                fx_map[d] = ccy.get('EUR', 1.0)
             if fx_map:
-                print('[fx] Got {} ECB rates for {}'.format(len(fx_map), currency))
+                print('[fx] {} ECB rates for {}'.format(len(fx_map), currency))
                 return fx_map
-        else:
-            print('[fx] Frankfurter returned {}'.format(resp.status_code))
     except Exception as exc:
         print('[fx] Frankfurter failed for {}: {}'.format(currency, exc))
 
@@ -70,7 +84,7 @@ def get_fx_map(currency, start_str, end_str):
 
 
 def lookup_fx(d, fx_map, currency):
-    """Get FX rate for date d, using nearest available trading day if needed."""
+    """Get FX rate for date d; interpolate to nearest trading day if needed."""
     if currency == 'EUR' or not fx_map:
         return 1.0
     if d in fx_map:
@@ -80,7 +94,7 @@ def lookup_fx(d, fx_map, currency):
 
 
 # ---------------------------------------------------------------------------
-# News — Google News RSS (free, no key, aggregates all target sources)
+# News — Google News RSS
 # ---------------------------------------------------------------------------
 
 SOURCE_DOMAINS = {
@@ -122,21 +136,15 @@ def parse_entry_date(entry):
 
 
 def fetch_news(ticker, start_date, end_date):
-    """Search Google News RSS for articles about ticker within date range."""
     items = []
     seen  = set()
-
     query     = '{} ({})'.format(ticker, SOURCES_SITE_QUERY)
     gnews_url = (
         'https://news.google.com/rss/search'
         '?q={}&hl=en-US&gl=US&ceid=US:en'.format(quote(query))
     )
-
     try:
-        feed = feedparser.parse(
-            gnews_url,
-            request_headers={'User-Agent': 'Mozilla/5.0'}
-        )
+        feed = feedparser.parse(gnews_url, request_headers={'User-Agent': 'Mozilla/5.0'})
         for entry in feed.entries:
             pub_date = parse_entry_date(entry)
             if not pub_date or not (start_date <= pub_date <= end_date):
@@ -158,7 +166,6 @@ def fetch_news(ticker, start_date, end_date):
             })
     except Exception as exc:
         print('[news] Google News RSS error: {}'.format(exc))
-
     items.sort(key=lambda x: x['date'])
     return items
 
@@ -216,15 +223,18 @@ def analyze():
             return jsonify({
                 'error': (
                     'No price data found for "{}". '
-                    'Check the ticker symbol and date range. '
-                    'Note: cryptocurrency is not supported.'.format(ticker)
+                    'Check the symbol and date range. '
+                    'Crypto is not supported.'.format(ticker)
                 )
             }), 404
 
-        # stooq .US tickers are priced in USD; detect currency from suffix
-        currency = 'EUR' if stooq_ticker.endswith('.DE') else 'USD'
+        # stooq .US tickers are priced in USD; .DE tickers in EUR
+        if stooq_ticker.upper().endswith('.DE'):
+            currency = 'EUR'
+        else:
+            currency = 'USD'
 
-        # 2 — FX rates from Frankfurter/ECB
+        # 2 — FX rates from ECB via Frankfurter
         fx_map = get_fx_map(currency, start_str, end_str)
 
         def make_point(d, close):
@@ -257,7 +267,7 @@ def analyze():
         if not price_data:
             return jsonify({'error': 'No price data in this date range.'}), 404
 
-        # 4 — News from Google News RSS
+        # 4 — News
         news_items     = fetch_news(ticker, start_date, end_date)
         news_by_period = group_news(news_items, price_data, is_weekly)
 
