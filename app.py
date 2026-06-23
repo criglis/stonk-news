@@ -17,10 +17,99 @@ TWELVE_DATA_KEY = os.environ.get('TWELVE_DATA_KEY', '')
 # add TWELVE_DATA_KEY=<key> in Render dashboard → Environment
 # ---------------------------------------------------------------------------
 
+YAHOO_SUFFIX_MAP = {
+    'ASE': '.AT', 'XATH': '.AT',
+    'LSE': '.L',  'XLON': '.L',
+    'XETRA': '.DE', 'XFRA': '.DE',
+    'XPAR': '.PA',
+    'XAMS': '.AS',
+    'XMIL': '.MI',
+    'XMAD': '.MC',
+    'XLIS': '.LS',
+    'XBRU': '.BR',
+    'XHEL': '.HE',
+    'XWBO': '.VI',
+    'XDUB': '.IR',
+    'XTSE': '.TO',
+    'XASX': '.AX',
+    'XHKG': '.HK',
+    'XTKS': '.T',
+}
+
+
+def _twelvedata_search(ticker):
+    """Search Twelve Data for the ticker to find its exchange."""
+    try:
+        resp = requests.get(
+            'https://api.twelvedata.com/symbol_search',
+            params={'symbol': ticker, 'apikey': TWELVE_DATA_KEY},
+            timeout=10,
+        )
+        results = resp.json().get('data', [])
+        for r in results:
+            if r.get('symbol', '').upper() == ticker.upper():
+                return r
+    except Exception:
+        pass
+    return None
+
+
+def _yahoo_symbol(ticker, exchange=''):
+    """Convert a ticker + exchange to a Yahoo Finance symbol."""
+    suffix = YAHOO_SUFFIX_MAP.get(exchange, '')
+    if suffix:
+        return ticker + suffix
+    return ticker
+
+
+def _get_price_yahoo(ticker, start_str, end_str, exchange_hint=''):
+    """Fallback: fetch price data from Yahoo Finance chart API."""
+    yahoo_sym = _yahoo_symbol(ticker, exchange_hint)
+
+    start_dt = datetime.strptime(start_str, '%Y-%m-%d')
+    end_dt   = datetime.strptime(end_str,   '%Y-%m-%d') + timedelta(days=1)
+    period1  = int(start_dt.timestamp())
+    period2  = int(end_dt.timestamp())
+
+    resp = requests.get(
+        'https://query1.finance.yahoo.com/v8/finance/chart/{}'.format(yahoo_sym),
+        params={'interval': '1d', 'period1': period1, 'period2': period2},
+        headers={'User-Agent': 'Mozilla/5.0'},
+        timeout=20,
+    )
+    data = resp.json()
+    result = (data.get('chart', {}).get('result') or [None])[0]
+    if not result:
+        return None, None, None
+
+    meta       = result.get('meta', {})
+    currency   = meta.get('currency', 'USD')
+    exchange   = meta.get('fullExchangeName', exchange_hint)
+    timestamps = result.get('timestamp', [])
+    closes     = result.get('indicators', {}).get('quote', [{}])[0].get('close', [])
+
+    records = []
+    for ts, c in zip(timestamps, closes):
+        if c is None:
+            continue
+        records.append({
+            'Date':  pd.to_datetime(datetime.utcfromtimestamp(ts).date()),
+            'Close': float(c),
+        })
+
+    if not records:
+        return None, None, None
+
+    df = pd.DataFrame(records).set_index('Date').sort_index()
+    print('[yahoo] {} → {} ({} points)'.format(ticker, yahoo_sym, len(df)))
+    return df, currency, exchange
+
+
 def get_price_history(ticker, start_str, end_str):
     """
     Returns (DataFrame with DatetimeIndex + 'Close' column, currency, exchange)
     or raises RuntimeError with a user-friendly message.
+    Tries Twelve Data first, falls back to Yahoo Finance.
     """
     if not TWELVE_DATA_KEY:
         raise RuntimeError(
@@ -42,14 +131,21 @@ def get_price_history(ticker, start_str, end_str):
     )
     data = resp.json()
 
+    needs_fallback = False
     if data.get('status') == 'error':
         msg = data.get('message', 'Unknown error from Twelve Data')
         print('[twelvedata] {}: {}'.format(ticker, msg))
-        return None, None, None
+        needs_fallback = True
 
-    values = data.get('values', [])
-    if not values:
-        return None, None, None
+    values = data.get('values', []) if not needs_fallback else []
+    if not needs_fallback and not values:
+        needs_fallback = True
+
+    if needs_fallback:
+        search = _twelvedata_search(ticker)
+        exc = search.get('exchange', '') if search else ''
+        print('[fallback] Trying Yahoo Finance for {} (exchange: {})'.format(ticker, exc))
+        return _get_price_yahoo(ticker, start_str, end_str, exc)
 
     meta     = data.get('meta', {})
     currency = meta.get('currency', 'USD')
