@@ -18,6 +18,7 @@ TWELVE_DATA_KEY = os.environ.get('TWELVE_DATA_KEY', '')
 # ---------------------------------------------------------------------------
 
 YAHOO_SUFFIX_MAP = {
+    # Europe
     'ASE': '.AT', 'XATH': '.AT',
     'LSE': '.L',  'XLON': '.L',
     'XETRA': '.DE', 'XFRA': '.DE',
@@ -30,10 +31,62 @@ YAHOO_SUFFIX_MAP = {
     'XHEL': '.HE',
     'XWBO': '.VI',
     'XDUB': '.IR',
-    'XTSE': '.TO',
-    'XASX': '.AX',
-    'XHKG': '.HK',
-    'XTKS': '.T',
+    'XOSL': '.OL',
+    'XSTO': '.ST',
+    'XCSE': '.CO',
+    'XICE': '.IC',
+    'XWAR': '.WA',
+    'XPRA': '.PR',
+    'XBUD': '.BD',
+    'XBUL': '.SO',
+    'XBSE': '.RO',
+    'XZAG': '.ZA',
+    'XLJU': '.LJ',
+    # China
+    'XSHG': '.SS', 'SSE': '.SS', 'Shanghai': '.SS',
+    'XSHE': '.SZ', 'SZSE': '.SZ', 'Shenzhen': '.SZ',
+    # Hong Kong
+    'XHKG': '.HK', 'HKSE': '.HK',
+    # India
+    'XNSE': '.NS', 'NSE': '.NS',
+    'XBOM': '.BO', 'BSE': '.BO',
+    # Japan & Korea
+    'XTKS': '.T',  'TSE': '.T',
+    'XKRX': '.KS', 'KRX': '.KS', 'KOSDAQ': '.KQ',
+    # Southeast Asia
+    'XSES': '.SI',
+    'XKLS': '.KL',
+    'XBKK': '.BK',
+    'XIDX': '.JK',
+    'XPHS': '.PS',
+    # Australia & New Zealand
+    'XASX': '.AX', 'ASX': '.AX',
+    'XNZE': '.NZ',
+    # Middle East
+    'XSAU': '.SR', 'Tadawul': '.SR',
+    'XDFM': '.AE',
+    'XADS': '.AE',
+    'XQAT': '.QA',
+    'XKUW': '.KW',
+    'XBAH': '.BH',
+    'XMUS': '.OM',
+    'XTAE': '.TA', 'TASE': '.TA',
+    # Latin America
+    'XBSP': '.SA', 'BOVESPA': '.SA', 'BVMF': '.SA',
+    'XMEX': '.MX', 'BMV': '.MX',
+    'XBUE': '.BA',
+    'XSGO': '.SN', 'BCS': '.SN',
+    'XLIM': '.LM',
+    'XBOG': '.CL',
+    # Africa
+    'XJSE': '.JO',
+    'XCAI': '.CA',
+    'XNSA': '.NL',
+    # Canada
+    'XTSE': '.TO', 'TSX': '.TO',
+    'XTSX': '.V',
+    # Taiwan
+    'XTAI': '.TW', 'TWSE': '.TW',
 }
 
 
@@ -62,9 +115,34 @@ def _yahoo_symbol(ticker, exchange=''):
     return ticker
 
 
+def _yahoo_search(ticker):
+    """Search Yahoo Finance for the correct symbol."""
+    try:
+        resp = requests.get(
+            'https://query1.finance.yahoo.com/v1/finance/search',
+            params={'q': ticker, 'quotesCount': 5, 'newsCount': 0},
+            headers={'User-Agent': 'Mozilla/5.0'},
+            timeout=10,
+        )
+        quotes = resp.json().get('quotes', [])
+        for q in quotes:
+            sym = q.get('symbol', '')
+            if sym.upper().startswith(ticker.upper()):
+                print('[yahoo-search] {} → {}'.format(ticker, sym))
+                return sym
+    except Exception:
+        pass
+    return None
+
+
 def _get_price_yahoo(ticker, start_str, end_str, exchange_hint=''):
     """Fallback: fetch price data from Yahoo Finance chart API."""
     yahoo_sym = _yahoo_symbol(ticker, exchange_hint)
+
+    if yahoo_sym == ticker:
+        searched = _yahoo_search(ticker)
+        if searched:
+            yahoo_sym = searched
 
     start_dt = datetime.strptime(start_str, '%Y-%m-%d')
     end_dt   = datetime.strptime(end_str,   '%Y-%m-%d') + timedelta(days=1)
