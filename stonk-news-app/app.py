@@ -9,7 +9,8 @@ from urllib.parse import quote
 
 app = Flask(__name__)
 
-TWELVE_DATA_KEY = os.environ.get('TWELVE_DATA_KEY', '')
+TWELVE_DATA_KEY   = os.environ.get('TWELVE_DATA_KEY', '')
+ALPHA_VANTAGE_KEY = os.environ.get('ALPHA_VANTAGE_KEY', '')
 
 # ---------------------------------------------------------------------------
 # Price data — Twelve Data REST API (free tier: 800 req/day, no IP blocks)
@@ -183,11 +184,100 @@ def _get_price_yahoo(ticker, start_str, end_str, exchange_hint=''):
     return df, currency, exchange
 
 
+ALPHA_VANTAGE_EXCHANGE_MAP = {
+    'ADX': '.ADX', 'XADS': '.ADX',
+    'DFM': '.DFM', 'XDFM': '.DFM',
+    'ASE': '.ATH', 'XATH': '.ATH',
+    'SSE': '.SHH', 'XSHG': '.SHH',
+    'SZSE': '.SHZ', 'XSHE': '.SHZ',
+    'NSE': '.NSE', 'XNSE': '.NSE',
+    'BSE': '.BSE', 'XBOM': '.BSE',
+    'BOVESPA': '.SAO', 'BVMF': '.SAO', 'XBSP': '.SAO',
+    'BMV': '.MEX', 'XMEX': '.MEX',
+    'Tadawul': '.SAU', 'XSAU': '.SAU',
+    'TASE': '.TLV', 'XTAE': '.TLV',
+    'LSE': '.LON', 'XLON': '.LON',
+    'XETRA': '.DEX', 'XFRA': '.FRK',
+    'XPAR': '.PAR',
+    'XTSE': '.TRT',
+    'XASX': '.AXS', 'ASX': '.AXS',
+    'XHKG': '.HKG', 'HKSE': '.HKG',
+    'XTKS': '.TKS', 'TSE': '.TKS',
+}
+
+
+def _get_price_alphavantage(ticker, start_str, end_str, exchange_hint=''):
+    """Second fallback: Alpha Vantage (25 req/day free tier)."""
+    if not ALPHA_VANTAGE_KEY:
+        return None, None, None
+
+    suffix = ALPHA_VANTAGE_EXCHANGE_MAP.get(exchange_hint, '')
+    av_symbol = ticker + suffix
+
+    try:
+        resp = requests.get(
+            'https://www.alphavantage.co/query',
+            params={
+                'function':   'TIME_SERIES_DAILY',
+                'symbol':     av_symbol,
+                'outputsize': 'full',
+                'apikey':     ALPHA_VANTAGE_KEY,
+            },
+            timeout=20,
+        )
+        data = resp.json()
+
+        ts = data.get('Time Series (Daily)', {})
+        if not ts:
+            if av_symbol != ticker:
+                resp2 = requests.get(
+                    'https://www.alphavantage.co/query',
+                    params={
+                        'function':   'TIME_SERIES_DAILY',
+                        'symbol':     ticker,
+                        'outputsize': 'full',
+                        'apikey':     ALPHA_VANTAGE_KEY,
+                    },
+                    timeout=20,
+                )
+                ts = resp2.json().get('Time Series (Daily)', {})
+            if not ts:
+                print('[alphavantage] No data for {}'.format(av_symbol))
+                return None, None, None
+
+        start_date = datetime.strptime(start_str, '%Y-%m-%d').date()
+        end_date   = datetime.strptime(end_str,   '%Y-%m-%d').date()
+
+        meta     = data.get('Meta Data', {})
+        currency = 'USD'
+        exchange = exchange_hint
+
+        records = []
+        for date_str, values in ts.items():
+            d = datetime.strptime(date_str, '%Y-%m-%d').date()
+            if start_date <= d <= end_date:
+                records.append({
+                    'Date':  pd.to_datetime(d),
+                    'Close': float(values['4. close']),
+                })
+
+        if not records:
+            return None, None, None
+
+        df = pd.DataFrame(records).set_index('Date').sort_index()
+        print('[alphavantage] {} → {} ({} points)'.format(ticker, av_symbol, len(df)))
+        return df, currency, exchange
+
+    except Exception as exc:
+        print('[alphavantage] Error for {}: {}'.format(av_symbol, exc))
+        return None, None, None
+
+
 def get_price_history(ticker, start_str, end_str):
     """
     Returns (DataFrame with DatetimeIndex + 'Close' column, currency, exchange)
     or raises RuntimeError with a user-friendly message.
-    Tries Twelve Data first, falls back to Yahoo Finance.
+    Tries Twelve Data → Yahoo Finance → Alpha Vantage.
     """
     if not TWELVE_DATA_KEY:
         raise RuntimeError(
@@ -222,8 +312,18 @@ def get_price_history(ticker, start_str, end_str):
     if needs_fallback:
         search = _twelvedata_search(ticker)
         exc = search.get('exchange', '') if search else ''
+
         print('[fallback] Trying Yahoo Finance for {} (exchange: {})'.format(ticker, exc))
-        return _get_price_yahoo(ticker, start_str, end_str, exc)
+        result = _get_price_yahoo(ticker, start_str, end_str, exc)
+        if result[0] is not None:
+            return result
+
+        print('[fallback] Trying Alpha Vantage for {} (exchange: {})'.format(ticker, exc))
+        result = _get_price_alphavantage(ticker, start_str, end_str, exc)
+        if result[0] is not None:
+            return result
+
+        return None, None, None
 
     meta     = data.get('meta', {})
     currency = meta.get('currency', 'USD')
