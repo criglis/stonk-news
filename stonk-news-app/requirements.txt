@@ -1,0 +1,5 @@
+flask==3.0.3
+pandas
+feedparser==6.0.11
+requests==2.31.0
+gunicorn==22.0.0
